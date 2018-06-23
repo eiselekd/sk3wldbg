@@ -78,6 +78,43 @@
 #include "sk3wldbg.h"
 #include "loader.h"
 
+struct SegmentDescriptor {
+	union {
+		struct {
+#if __BYTE_ORDER == __LITTLE_ENDIAN
+			unsigned short limit0;
+			unsigned short base0;
+			unsigned char base1;
+			unsigned char type : 4;
+			unsigned char system : 1;      /* S flag */
+			unsigned char dpl : 2;
+			unsigned char present : 1;     /* P flag */
+			unsigned char limit1 : 4;
+			unsigned char avail : 1;
+			unsigned char is_64_code : 1;  /* L flag */
+			unsigned char db : 1;          /* DB flag */
+			unsigned char granularity : 1; /* G flag */
+			unsigned char base2;
+#else
+			unsigned char base2;
+			unsigned char granularity : 1; /* G flag */
+			unsigned char db : 1;          /* DB flag */
+			unsigned char is_64_code : 1;  /* L flag */
+			unsigned char avail : 1;
+			unsigned char limit1 : 4;
+			unsigned char present : 1;     /* P flag */
+			unsigned char dpl : 2;
+			unsigned char system : 1;      /* S flag */
+			unsigned char type : 4;
+			unsigned char base1;
+			unsigned short base0;
+			unsigned short limit0;
+#endif
+		};
+		uint64_t desc;
+	};
+};
+
 static ssize_t idaapi idd_hook(void * /* ud */, int notification_code, va_list va);
 
 struct safe_msg : public exec_request_t {
@@ -435,10 +472,10 @@ int idaapi uni_start_process(const char * /*path*/,
 
    //init registers
    //register unicorn hooks
+   uc->initGsSegment();
 
    //need other ways to set PC, from start, user specified
    uc->set_pc(init_pc);
-
 #ifdef DEBUG
    ipc = (ea_t)uc->get_pc();
    qsnprintf(msgbuf, sizeof(msgbuf), "After set_pc, unicorn pc is: 0x%llx\n", (uint64_t)ipc);
@@ -1522,6 +1559,7 @@ drc_t uni_bin_search(ea_t * /*ea*/, ea_t /*start_ea*/, ea_t /*end_ea*/,
 
 
 sk3wldbg::sk3wldbg(const char *procname, uc_arch arch, uc_mode mode, const char *cpu_model) {
+   gdt = NULL;
    version = IDD_INTERFACE_VERSION;
    uc = NULL;
    name = "sk3wldbg";
@@ -1891,6 +1929,81 @@ uint64_t sk3wldbg::get_pc() {
       }
    }
    return (uint64_t)-1LL;
+}
+
+
+
+
+//VERY basic descriptor init function, sets many fields to user space sane defaults
+static void init_descriptor(struct SegmentDescriptor *desc, uint32_t base, uint32_t limit, uint8_t is_code)
+{
+	desc->desc = 0;  //clear the descriptor
+	desc->base0 = base & 0xffff;
+	desc->base1 = (base >> 16) & 0xff;
+	desc->base2 = base >> 24;
+	if (limit > 0xfffff) {
+		//need Giant granularity
+		limit >>= 12;
+		desc->granularity = 1;
+	}
+	desc->limit0 = limit & 0xffff;
+	desc->limit1 = limit >> 16;
+
+	//some sane defaults
+	desc->dpl = 0;
+	desc->present = 1;
+	desc->db = 1;   //32 bit
+	desc->type = is_code ? 0xb : 3;
+	desc->system = 1;  //code or data
+}
+
+uint64_t sk3wldbg::initGsSegment(void) {
+	uc_err err;
+
+	const uint64_t gdt_address = 0x800000;
+	const uint64_t fs_address = 0x7efe0000;
+	const uint64_t gs_address = 0x7efdd000;
+
+	uint32_t stack_addr = 0x5a000;
+
+	struct SegmentDescriptor *gdt = (struct SegmentDescriptor*)calloc(31, sizeof(struct SegmentDescriptor));
+	gdtr.base = gdt_address;
+	gdtr.limit = 31 * sizeof(struct SegmentDescriptor) - 1;
+
+	init_descriptor(&gdt[1], 0, 0xfffff000, 1);  //code segment, dpl == 0
+	init_descriptor(&gdt[2], 0, 0xfffff000, 0);  //data segment, dpl == 0
+	init_descriptor(&gdt[3], 0x7efe0000, 0xfff, 0);  //one page data segment simulate fs, dpl == 0
+	init_descriptor(&gdt[7], 0x7efdd000, 0xfff, 0);  //one page data segment simulate gs, dpl == 3
+	gdt[7].dpl = 3;
+
+	err = uc_reg_write(uc, UC_X86_REG_GDTR, &gdtr);
+	err = uc_mem_write(uc, gdt_address, gdt, 31 * sizeof(struct SegmentDescriptor));
+	err = uc_mem_map(uc, fs_address, 0x1000, UC_PROT_WRITE | UC_PROT_READ);
+	err = uc_mem_map(uc, gs_address, 0x1000, UC_PROT_WRITE | UC_PROT_READ);
+
+	/* init some values in gs segment */
+	err = uc_mem_write(uc, gs_address, &stack_addr, sizeof(stack_addr));
+
+	/* offset into GDT with gdt==0 and dpl==0*/
+	int r_cs = 8*1;
+	int r_ss = 8*2;
+	int r_ds = 8*2;
+	int r_es = 8*2;
+	int r_fs = 8*3;
+	int r_gs = (8*7) | 3;
+
+	// when setting SS, need rpl == cpl && dpl == cpl
+	// emulator starts with cpl == 0, so we need a dpl 0 descriptor and rpl 0 selector	
+	err = uc_reg_write(uc, UC_X86_REG_SS, &r_ss);
+	
+	err = uc_reg_write(uc, UC_X86_REG_CS, &r_cs);
+	err = uc_reg_write(uc, UC_X86_REG_DS, &r_ds);
+	err = uc_reg_write(uc, UC_X86_REG_ES, &r_es);
+	
+	err = uc_reg_write(uc, UC_X86_REG_FS, &r_fs);
+	err = uc_reg_write(uc, UC_X86_REG_GS, &r_gs);
+
+	return 0;
 }
 
 bool sk3wldbg::set_pc(uint64_t pc) {

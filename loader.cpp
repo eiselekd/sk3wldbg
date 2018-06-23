@@ -414,7 +414,7 @@ bool loadElf32(sk3wldbg *uc, void *img, size_t sz, const char *args) {
          ea_t begin = p_vaddr & ~0xfff;
          ea_t end = (p_vaddr + p_memsz + 0xfff) & ~0xfff;
          msg("ELF32 loader mapping 0x%x bytes at 0x%x, from file offset 0x%x\n", p_memsz, p_vaddr, p_offset);
-         void *block = uc->map_mem_zero(begin, end, ida_to_uc_perms_map[p_flags & 7]);
+         void *block = uc->map_mem_zero(begin, end, UC_PROT_ALL /*ida_to_uc_perms_map[p_flags & 7]*/);
          size_t offset = p_offset & ~0xfff;
          size_t endoff = (p_offset + p_filesz + 0xfff) & ~0xfff;
          if (endoff > sz) {

@@ -135,6 +135,8 @@ struct sk3wldbg : public debugger_t {
    event_id_t last_eid;
    
    int32_t *reg_map;  //map of internal unicorn reg enums to dbg->_register index values
+   struct SegmentDescriptor *gdt;
+   uc_x86_mmr gdtr;
 
    sk3wldbg(const char *procname, uc_arch arch, uc_mode mode, const char *cpu_model = NULL);
    ~sk3wldbg();   
@@ -186,6 +188,9 @@ struct sk3wldbg : public debugger_t {
    bool set_pc(uint64_t);
    uint64_t get_sp();
    bool set_sp(uint64_t);
+
+   uint64_t initGsSegment();
+
 
    run_state get_state();
    void set_state(run_state new_state);
